@@ -2,17 +2,43 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Metal Slug Animation Style</title>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
+    <div id="start-screen" style="position: absolute; top:0; left:0; width:100vw; height:100vh; background:rgba(0,0,0,0.9); z-index:999; display:flex; justify-content:center; align-items:center; color:white; flex-direction:column; cursor:pointer;">
+        <h1 style="color:#e74c3c; font-size:48px; text-shadow: 2px 2px 0 #000, -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000;">METAL SLUG SURVIVAL</h1>
+        <h2>TAP HERE TO START</h2>
+    </div>
+
     <div id="game-container">
         <canvas id="gameCanvas" width="800" height="400"></canvas>
+        <div id="mobile-controls">
+            <div id="dpad">
+                <button id="btn-left">◀</button>
+                <button id="btn-down">▼</button>
+                <button id="btn-right">▶</button>
+            </div>
+            <div id="action-buttons">
+                <button id="btn-b">B</button>
+                <button id="btn-a">A</button>
+                <button id="btn-x">X</button>
+            </div>
+        </div>
         <div id="instructions">
-            <strong>Controls:</strong> Left/Right Arrows to Move | <strong>X</strong> to Jump | <strong>A</strong> to Shoot | <strong>B</strong> to Throw Bomb
+            <strong>Controls:</strong> Left/Right Arrows to Move | <strong>Down</strong> to Duck | <strong>X</strong> to Jump | <strong>A</strong> to Shoot | <strong>B</strong> to Throw Bomb
         </div>
     </div>
+    
+    <div id="ost-container" style="display:none;"></div>
+
+    <script>
+        document.getElementById('start-screen').addEventListener('click', function() {
+            this.style.display = 'none';
+            document.getElementById('ost-container').innerHTML = '<iframe width="1" height="1" src="https://www.youtube.com/embed/sj82vioqAi4?autoplay=1&loop=1&playlist=sj82vioqAi4" frameborder="0" allow="autoplay"></iframe>';
+        });
+    </script>
     <script src="game.js"></script>
 </body>
 </html>

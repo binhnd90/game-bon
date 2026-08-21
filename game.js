@@ -1,6 +1,8 @@
 const canvas = document.getElementById('gameCanvas');
 const ctx = canvas.getContext('2d');
 
+let gameState = 'PLAYING'; // PLAYING or GAMEOVER
+
 const keys = {
     ArrowLeft: false,
     ArrowRight: false,
@@ -11,6 +13,10 @@ const keys = {
 };
 
 window.addEventListener('keydown', (e) => {
+    if (gameState === 'GAMEOVER') {
+        resetGame();
+        return;
+    }
     if (keys.hasOwnProperty(e.key)) {
         keys[e.key] = true;
     }
@@ -22,6 +28,51 @@ window.addEventListener('keyup', (e) => {
     }
 });
 
+// Click/Touch canvas to restart
+canvas.addEventListener('mousedown', (e) => {
+    if (gameState === 'GAMEOVER') resetGame();
+});
+canvas.addEventListener('touchstart', (e) => {
+    if (gameState === 'GAMEOVER') {
+        e.preventDefault();
+        resetGame();
+    }
+});
+
+
+// Mobile Controls Binding (Optimized with Pointer Events)
+function bindButton(btnId, keyName) {
+    const btn = document.getElementById(btnId);
+    if (!btn) return;
+    
+    // Pointer events are significantly faster and unify touch/mouse with no 300ms delay
+    btn.addEventListener('pointerdown', (e) => {
+        if (gameState === 'GAMEOVER') { resetGame(); return; }
+        e.preventDefault();
+        keys[keyName] = true;
+    });
+    btn.addEventListener('pointerup', (e) => {
+        e.preventDefault();
+        keys[keyName] = false;
+    });
+    btn.addEventListener('pointerleave', (e) => {
+        keys[keyName] = false;
+    });
+    btn.addEventListener('pointercancel', (e) => {
+        keys[keyName] = false;
+    });
+    // Fallback for some older devices to prevent ghost clicks
+    btn.addEventListener('touchstart', (e) => { e.preventDefault(); }, {passive: false});
+}
+
+bindButton('btn-left', 'ArrowLeft');
+bindButton('btn-right', 'ArrowRight');
+bindButton('btn-down', 'ArrowDown');
+bindButton('btn-x', 'x');
+bindButton('btn-a', 'a');
+bindButton('btn-b', 'b');
+
+
 // Game Entities
 let player;
 let bullets = [];
@@ -30,9 +81,81 @@ let enemies = [];
 let tanks = [];
 let particles = [];
 
+class Powerup {
+    constructor(x, y) {
+        this.x = x;
+        this.y = y;
+        this.vy = 0;
+        this.active = true;
+    }
+    update() {
+        this.vy += GRAVITY;
+        let oldY = this.y;
+        this.y += this.vy;
+        if (this.vy >= 0) {
+            let onStair = false;
+            for (let i = 0; i < STAIRS.length; i++) {
+                let s = STAIRS[i];
+                let px = this.x;
+                if (px >= s.x1 && px <= s.x2) {
+                    let pct = (px - s.x1) / (s.x2 - s.x1);
+                    let stairY = s.y1 + pct * (s.y2 - s.y1);
+                    if (oldY <= stairY + 10 && this.y >= stairY - 10) {
+                        this.y = stairY;
+                        this.vy = 0;
+                        onStair = true;
+                        break;
+                    }
+                }
+            }
+            if (!onStair && this.vy > 0) {
+                for (let i = 0; i < PLATFORMS.length; i++) {
+                    let py = PLATFORMS[i];
+                    if (oldY <= py && this.y >= py) {
+                        this.y = py;
+                        this.vy = 0;
+                        break;
+                    }
+                }
+            }
+        }
+        
+        // Prevent falling off the bottom
+        if (this.y >= GROUND_Y) {
+            this.y = GROUND_Y;
+            this.vy = 0;
+        }
+        
+        // Player collision
+        let playerTop = player.y - (player.isDucking ? 30 : 60);
+        let dist = Math.hypot(player.x - this.x, (player.y + playerTop)/2 - (this.y - 15));
+        if (dist < 40) {
+            this.active = false;
+            player.weapon = 'H';
+            player.hAmmo = 100;
+        }
+    }
+    draw(ctx) {
+        ctx.fillStyle = '#f1c40f'; // Yellow box
+        ctx.fillRect(this.x - 15, this.y - 30, 30, 30);
+        ctx.fillStyle = '#e74c3c'; // Red H
+        ctx.font = 'bold 24px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('H', this.x, this.y - 8);
+        ctx.textAlign = 'left';
+    }
+}
+let powerups = [];
+
+
 // Constants
 const GRAVITY = 0.6;
 const GROUND_Y = 350;
+const PLATFORMS = [150, 250, 350];
+const STAIRS = [
+    { x1: 150, y1: 350, x2: 250, y2: 250 },
+    { x1: 550, y1: 250, x2: 650, y2: 150 }
+];
 
 class Player {
     constructor() {
@@ -58,11 +181,15 @@ class Player {
         this.animTime = 0;
         this.isShooting = false;
         this.shootTime = 0;
+        this.weapon = 'normal';
+        this.hAmmo = 0;
     }
 
     update() {
+        if (this.hp <= 0) return; // Don't move if dead
+        
         // Ducking
-        if (keys.ArrowDown && !this.isJumping) {
+        if (keys.ArrowDown && onGround) {
             this.isDucking = true;
             this.vx = 0; // stop moving when ducking
             this.animTime = 0;
@@ -86,7 +213,7 @@ class Player {
         this.x += this.vx;
 
         // Jump
-        if (keys.x && !this.isJumping && !this.isDucking) {
+        if (keys.x && onGround && !keys.ArrowDown) {
             this.vy = this.jumpForce;
             this.isJumping = true;
             keys.x = false; 
@@ -94,13 +221,64 @@ class Player {
 
         // Gravity
         this.vy += GRAVITY;
+        let oldY = this.y;
         this.y += this.vy;
+        let onGround = false;
 
-        // Ground collision
+        // Platform and Stair collision
+        if (this.vy >= 0) { // Collide when falling or walking flat
+            
+            // 1. Check Stairs first
+            let onStair = false;
+            for (let i = 0; i < STAIRS.length; i++) {
+                let s = STAIRS[i];
+                let px = this.x;
+                // If within stair horizontal bounds
+                if (px >= s.x1 && px <= s.x2) {
+                    let pct = (px - s.x1) / (s.x2 - s.x1);
+                    let stairY = s.y1 + pct * (s.y2 - s.y1);
+                    
+                    // If we are falling onto the stairs, or already standing on them (within a margin of error)
+                    if (oldY <= stairY + 10 && this.y >= stairY - 10) {
+                        if (keys.ArrowDown && keys.x) {
+                            // drop through
+                        } else {
+                            this.y = stairY;
+                            this.vy = 0;
+                            this.isJumping = false;
+                            onGround = true;
+                            onStair = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            
+            // 2. Check Platforms if not on a stair
+            if (!onStair && this.vy > 0) {
+                for (let i = 0; i < PLATFORMS.length; i++) {
+                    let py = PLATFORMS[i];
+                    if (oldY <= py && this.y >= py) {
+                        if (keys.ArrowDown && keys.x && py !== GROUND_Y) {
+                            // Drop through
+                        } else {
+                            this.y = py;
+                            this.vy = 0;
+                            this.isJumping = false;
+                            onGround = true;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Prevent falling off the bottom
         if (this.y >= GROUND_Y) {
             this.y = GROUND_Y;
             this.vy = 0;
             this.isJumping = false;
+            onGround = true;
         }
 
         // Keep in bounds
@@ -111,9 +289,21 @@ class Player {
         if (this.shootCooldown > 0) this.shootCooldown--;
         if (keys.a && this.shootCooldown <= 0) {
             let shootY = this.y - (this.isDucking ? 20 : 40);
-            let b = new Bullet(this.x + (20 * this.dir), shootY, this.dir, false);
-            bullets.push(b);
-            this.shootCooldown = 10;
+            
+            if (this.weapon === 'H' && this.hAmmo > 0) {
+                let b = new Bullet(this.x + (20 * this.dir), shootY + (Math.random()*10 - 5), this.dir, false);
+                b.width = 14;
+                b.vx = 20 * this.dir; // faster
+                bullets.push(b);
+                this.shootCooldown = 3; // very fast shooting
+                this.hAmmo--;
+                if (this.hAmmo <= 0) this.weapon = 'normal';
+            } else {
+                let b = new Bullet(this.x + (20 * this.dir), shootY, this.dir, false);
+                bullets.push(b);
+                this.shootCooldown = 10;
+            }
+            
             this.isShooting = true;
             this.shootTime = 10;
         }
@@ -134,6 +324,8 @@ class Player {
     }
 
     draw(ctx) {
+        if (this.hp <= 0) return; // Don't draw player if dead
+        
         ctx.save();
         ctx.translate(this.x, this.y);
         ctx.scale(this.dir, 1); 
@@ -260,10 +452,16 @@ class Bomb {
         this.vy += GRAVITY;
         this.y += this.vy;
 
-        if (this.y >= GROUND_Y) {
-            this.y = GROUND_Y;
-            this.vx *= 0.5; 
-            this.vy *= -0.4; 
+        if (this.vy > 0) {
+            for (let i = 0; i < PLATFORMS.length; i++) {
+                let py = PLATFORMS[i];
+                if (this.y - this.vy <= py && this.y >= py) {
+                    this.y = py;
+                    this.vx *= 0.5; 
+                    this.vy *= -0.4; 
+                    break;
+                }
+            }
         }
 
         this.timer--;
@@ -309,7 +507,7 @@ class Bomb {
 class Enemy {
     constructor(x) {
         this.x = x;
-        this.y = GROUND_Y;
+        this.y = PLATFORMS[Math.floor(Math.random() * PLATFORMS.length)];
         this.maxHp = 3;
         this.hp = this.maxHp;
         this.active = true;
@@ -317,6 +515,38 @@ class Enemy {
         this.shootCooldown = 60 + Math.random() * 60;
     }
     update() {
+        this.vy = this.vy || 0;
+        this.vy += GRAVITY;
+        let oldY = this.y;
+        this.y += this.vy;
+        if (this.vy >= 0) {
+            let onStair = false;
+            for (let i = 0; i < STAIRS.length; i++) {
+                let s = STAIRS[i];
+                let px = this.x;
+                if (px >= s.x1 && px <= s.x2) {
+                    let pct = (px - s.x1) / (s.x2 - s.x1);
+                    let stairY = s.y1 + pct * (s.y2 - s.y1);
+                    if (oldY <= stairY + 10 && this.y >= stairY - 10) {
+                        this.y = stairY;
+                        this.vy = 0;
+                        onStair = true;
+                        break;
+                    }
+                }
+            }
+            if (!onStair && this.vy > 0) {
+                for (let i = 0; i < PLATFORMS.length; i++) {
+                    let py = PLATFORMS[i];
+                    if (oldY <= py && this.y >= py) {
+                        this.y = py;
+                        this.vy = 0;
+                        break;
+                    }
+                }
+            }
+        }
+        
         let dx = player.x - this.x;
         if (Math.abs(dx) > 250) { 
             this.x += Math.sign(dx) * 1.5;
@@ -407,15 +637,47 @@ class Enemy {
 class Tank {
     constructor(x) {
         this.x = x;
-        this.y = GROUND_Y;
+        this.y = PLATFORMS[Math.floor(Math.random() * PLATFORMS.length)];
         this.maxHp = 15;
         this.hp = this.maxHp;
         this.active = true;
         this.shootCooldown = 100 + Math.random() * 50;
-        this.width = 80;
-        this.height = 40;
+        this.width = 140;
+        this.height = 70;
     }
     update() {
+        this.vy = this.vy || 0;
+        this.vy += GRAVITY;
+        let oldY = this.y;
+        this.y += this.vy;
+        if (this.vy >= 0) {
+            let onStair = false;
+            for (let i = 0; i < STAIRS.length; i++) {
+                let s = STAIRS[i];
+                let px = this.x;
+                if (px >= s.x1 && px <= s.x2) {
+                    let pct = (px - s.x1) / (s.x2 - s.x1);
+                    let stairY = s.y1 + pct * (s.y2 - s.y1);
+                    if (oldY <= stairY + 10 && this.y >= stairY - 10) {
+                        this.y = stairY;
+                        this.vy = 0;
+                        onStair = true;
+                        break;
+                    }
+                }
+            }
+            if (!onStair && this.vy > 0) {
+                for (let i = 0; i < PLATFORMS.length; i++) {
+                    let py = PLATFORMS[i];
+                    if (oldY <= py && this.y >= py) {
+                        this.y = py;
+                        this.vy = 0;
+                        break;
+                    }
+                }
+            }
+        }
+        
         // Move slowly
         let dx = player.x - this.x;
         if (Math.abs(dx) > 300) {
@@ -427,7 +689,7 @@ class Tank {
             } else {
                 let dir = Math.sign(player.x - this.x) || 1;
                 // Tank shoots bigger bullet that deals more damage
-                let b = new Bullet(this.x + (40 * dir), this.y - 32, dir, true);
+                let b = new Bullet(this.x + (70 * dir), this.y - 50, dir, true);
                 b.damage = 3;
                 b.width = 16;
                 b.height = 8;
@@ -443,7 +705,7 @@ class Tank {
         let tankRight = this.x + this.width/2;
         
         // Check if player is intersecting tank body
-        if (player.y > this.y - this.height && player.y - 60 < this.y) {
+        if (player.hp > 0 && player.y > this.y - this.height && player.y - 60 < this.y) {
             if (playerRight > tankLeft && playerLeft < tankRight) {
                 // Player crushed
                 player.hp = 0; 
@@ -466,43 +728,43 @@ class Tank {
 
         // Health bar
         ctx.fillStyle = '#ff0000';
-        ctx.fillRect(-25, -60, 50, 6);
+        ctx.fillRect(-35, -85, 70, 6);
         ctx.fillStyle = '#00ff00';
-        let hpWidth = Math.max(0, (this.hp / this.maxHp) * 50);
-        ctx.fillRect(-25, -60, hpWidth, 6);
+        let hpWidth = Math.max(0, (this.hp / this.maxHp) * 70);
+        ctx.fillRect(-35, -85, hpWidth, 6);
 
         let dir = Math.sign(player.x - this.x) || 1;
         ctx.scale(dir, 1);
 
-        // Tank Tracks (using path as roundRect might not be supported everywhere, but it's okay for modern canvas)
+        // Tank Tracks
         ctx.fillStyle = '#111';
         if (ctx.roundRect) {
             ctx.beginPath();
-            ctx.roundRect(-45, -12, 90, 12, 5);
+            ctx.roundRect(-70, -18, 140, 18, 5);
             ctx.fill();
         } else {
-            ctx.fillRect(-45, -12, 90, 12);
+            ctx.fillRect(-70, -18, 140, 18);
         }
 
         // Tank Body
         ctx.fillStyle = '#556B2F'; // Dark Olive Green
-        ctx.fillRect(-35, -30, 70, 20);
+        ctx.fillRect(-55, -45, 110, 30);
         
         // Tank details
         ctx.fillStyle = '#445626';
-        ctx.fillRect(-25, -25, 50, 10);
+        ctx.fillRect(-40, -35, 80, 15);
 
         // Turret
         ctx.fillStyle = '#4A5D23';
         ctx.beginPath();
-        ctx.arc(0, -30, 18, Math.PI, 0);
+        ctx.arc(0, -45, 25, Math.PI, 0);
         ctx.fill();
 
         // Gun Barrel
         ctx.fillStyle = '#333';
-        ctx.fillRect(0, -38, 55, 8);
+        ctx.fillRect(0, -55, 80, 12);
         ctx.fillStyle = '#222';
-        ctx.fillRect(50, -40, 8, 12); // muzzle
+        ctx.fillRect(70, -58, 12, 18); // muzzle
 
         ctx.restore();
     }
@@ -536,11 +798,11 @@ class Particle {
 }
 
 function spawnEnemy() {
-    if (Math.random() < 0.02 && enemies.length + tanks.length < 5) {
+    if (Math.random() < 0.06 && enemies.length + tanks.length < 15) {
         let x = Math.random() > 0.5 ? canvas.width + 50 : -50;
         
         // 10% chance to spawn a tank instead of a soldier
-        if (Math.random() < 0.1) {
+        if (Math.random() < 0.15) {
             tanks.push(new Tank(x));
         } else {
             enemies.push(new Enemy(x));
@@ -560,22 +822,35 @@ function resetGame() {
     tanks = [];
     bullets = [];
     bombs = [];
+    gameState = 'PLAYING';
+    
+    // Clear pressed keys
+    for(let k in keys) {
+        keys[k] = false;
+    }
 }
 
 function update() {
+    if (gameState === 'GAMEOVER') return;
+    
     player.update();
     
     spawnEnemy();
+    if (Math.random() < 0.005 && powerups.length < 1) powerups.push(new Powerup(Math.random()*canvas.width, 0));
 
     bullets.forEach(b => b.update());
     bombs.forEach(b => b.update());
     enemies.forEach(e => e.update());
     tanks.forEach(t => t.update());
     particles.forEach(p => p.update());
+    powerups.forEach(p => p.update());
 
     // Death check
     if (player.hp <= 0) {
-        resetGame();
+        gameState = 'GAMEOVER';
+        for(let i=0; i<30; i++) {
+            particles.push(new Particle(player.x, player.y - 30, '#ff0000'));
+        }
     }
 
     // Collisions: Bullets
@@ -589,7 +864,7 @@ function update() {
             let playerLeft = player.x - 15;
             let playerRight = player.x + 15;
 
-            if (bullet.x > playerLeft && bullet.x < playerRight &&
+            if (player.hp > 0 && bullet.x > playerLeft && bullet.x < playerRight &&
                 bullet.y > playerTop && bullet.y < playerBottom) {
                 bullet.active = false;
                 particles.push(new Particle(bullet.x, bullet.y, '#ff3b3b'));
@@ -617,7 +892,7 @@ function update() {
                         bullet.y > tank.y - tank.height && bullet.y < tank.y) {
                         bullet.active = false;
                         tank.hp -= bullet.damage;
-                        particles.push(new Particle(bullet.x, bullet.y, '#aaaaaa')); // metal spark
+                        particles.push(new Particle(bullet.x, bullet.y, '#aaaaaa')); 
                     }
                 }
             });
@@ -632,14 +907,22 @@ function update() {
     particles = particles.filter(p => p.life > 0);
 }
 
+
+// Cache background to improve performance
+const bgCanvas = document.createElement('canvas');
+bgCanvas.width = 800;
+bgCanvas.height = 400;
+const bgCtx = bgCanvas.getContext('2d', { alpha: false });
+
+function drawBackgroundOnce() {
+    ctx.drawImage(bgCanvas, 0, 0);
+}
+drawBackgroundOnce();
+
 function draw() {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    // Draw Ground
-    ctx.fillStyle = '#654321'; // Brown dirt
-    ctx.fillRect(0, GROUND_Y, canvas.width, canvas.height - GROUND_Y);
-    ctx.fillStyle = '#228B22'; // Grass top
-    ctx.fillRect(0, GROUND_Y, canvas.width, 10);
+    ctx.drawImage(bgCanvas, 0, 0);
 
     player.draw(ctx);
     
@@ -648,6 +931,7 @@ function draw() {
     bullets.forEach(b => b.draw(ctx));
     bombs.forEach(b => b.draw(ctx));
     particles.forEach(p => p.draw(ctx));
+    powerups.forEach(p => p.draw(ctx));
 
     // Draw Player Health Bar UI
     ctx.fillStyle = 'rgba(0,0,0,0.5)';
@@ -662,7 +946,35 @@ function draw() {
     
     ctx.fillStyle = '#fff';
     ctx.font = 'bold 14px sans-serif';
+    ctx.textAlign = 'left';
     ctx.fillText('PLAYER HP', 20, 12);
+
+    // Draw Weapon UI
+    ctx.fillStyle = '#fff';
+    ctx.font = 'bold 18px sans-serif';
+    if (player.weapon === 'H') {
+        ctx.fillStyle = '#f1c40f';
+        ctx.fillText(`HEAVY MACHINE GUN: ${player.hAmmo}`, 20, 50);
+    } else {
+        ctx.fillText(`PISTOL`, 20, 50);
+    }
+
+    
+    // Draw Game Over Overlay
+    if (gameState === 'GAMEOVER') {
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        
+        ctx.fillStyle = '#ff0000';
+        ctx.font = 'bold 64px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('GAME OVER', canvas.width/2, canvas.height/2 - 20);
+        
+        ctx.fillStyle = '#ffffff';
+        ctx.font = '24px sans-serif';
+        ctx.fillText('Press any key or Tap to Restart', canvas.width/2, canvas.height/2 + 40);
+        ctx.textAlign = 'left';
+    }
 }
 
 function gameLoop() {
